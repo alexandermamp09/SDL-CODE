@@ -220,9 +220,10 @@ void loop() {
       
       int vel_din = VELOCIDAD_BASE - (abs(error) * 0.2);
       if (vel_din < 40) vel_din = 40;
-
-      moverMotores(constrain(vel_din - correccion, -80, 140), 
-                   constrain(vel_din + correccion, -80, 140));
+int velmin = -80; 
+int velmax = 140;
+      moverMotores(constrain(vel_din - correccion, velmin, velmax), 
+                   constrain(vel_din + correccion, velmin, velmax));
       
       ultimo_error = error;
     } 
@@ -238,8 +239,9 @@ void loop() {
         // Mantenemos la dirección anterior pero la suavizamos (multiplicamos por 0.7)
         int velA = VELOCIDAD_BASE - (ultima_correccion * 0.7);
         int velB = VELOCIDAD_BASE + (ultima_correccion * 0.7);
-        
-        moverMotores(constrain(velA, 40, 100), constrain(velB, 40, 100));
+        int min = 40;
+        int max= 100; 
+        moverMotores(constrain(velA, min, max), constrain(velB, min, max));
       } 
       else {
         // ESTADO 3: MODO RECUPERACIÓN (Se perdió de verdad)
