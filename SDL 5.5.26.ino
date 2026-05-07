@@ -1,123 +1,141 @@
 #include <EEPROM.h>
 
+float promedioErrorReciente = 0; // Para saber si veníamos rectos
 
-// --- PARÁMETROS PID (Sugiero empezar con Ki y Kd en 0) ---
-float Kp = 0.24;   // Aumentado: el error máximo es 200, 200*0.8 = 160 de corrección
-float Ki = 0.1;  
-float Kd = 1;   
+// --- VARIABLES PARA FILTRO DE MEDIANA ---
+float historialErrores[3] = {0, 0, 0};
 
-// Variables Globales PID
+// --- CONFIGURACIÓN DE SENSORES Y FILTRO ---
+const int numSensores = 5;
+// El orden debe ser físico: de izquierda a derecha
+int pinesSensores[numSensores] = {A4, A3, A0, A2, A1}; 
+const int pesos[5] = {1000, 2000, 3000, 4000, 5000}; 
+float setpoint = 3000; // El centro ahora es el peso del sensor A0
+
+// Calibración (Ahora ajustada a 3 sensores para evitar errores de índice)
+int valorMin[5], valorMax[5];
+// --- SISTEMA DE MUESTREO (FILTRO DE MEDIA MÓVIL) ---
+const int TAMANO_FILTRO = 5; // Número de muestras para promediar
+float muestras[TAMANO_FILTRO];
+int indiceMuestra = 0;
+
+// --- PARÁMETROS PID ---
+float Kp = 0.08;   // Bajamos un poco más la agresividad inicial
+float Ki = 0.004;   
+float Kd = 0.04;    // Reducimos Kd para evitar los saltos bruscos de velocidad (de 123 a 74)
+
 float integral = 0;
-float LIMITE_INTEGRAL = 20; 
+float LIMITE_INTEGRAL = 50; 
 
-// Pines Puente H (Mantengo tus pines)
+unsigned long UMBRAL_INERCIA = 3400;
+
+// --- PINES PUENTE H ---
 int ENA = 9; int IN1 = 4; int IN2 = 5;
 int ENB = 6; int IN3 = 2; int IN4 = 3;
 
-const int numSensores = 5;
-int pinesSensores[numSensores] = {A4, A3, A0, A2, A1};
-const int pesos[5] = {100, 200, 300, 400, 500};
-int valorMin[numSensores], valorMax[numSensores];
-
-float setpoint = 300;
-int VELOCIDAD_BASE = 100; // Sube esto si el mínimo es 60 (2r 3az, 4r 5n)
+// --- VARIABLES DE MOVIMIENTO ---
+// Variables para capturar el último estado antes del modo inercia
+int ultimaVelA = 0;
+int ultimaVelB = 0;
+int VELOCIDAD_BASE = 70; 
 float ultimo_error = 0;
 unsigned long tiempo_anterior = 0;
 
-//Modo Inercia
-
 int inercia_min = 60;
-int inercia_max= 120;
+int inercia_max = 100;
+int velA, velB;
 
-int velA;
-int velB;
-          
-
-
-// --- VARIABLES MÁQUINA DE ESTADOS ---
+// --- MÁQUINA DE ESTADOS ---
 enum EstadoRobot { SIGUIENDO_LINEA, MODO_INERCIA, MODO_RECUPERACION };
 EstadoRobot estadoActual = SIGUIENDO_LINEA;
 
 unsigned long tiempoPerdido = 0;
-const int UMBRAL_INERCIA = 700; // ms que el robot irá recto (ajusta según el hueco)
-float ultima_correccion = 0;   // Para recordar qué hacía el PID antes de perderse
+float ultima_correccion = 0;
 
+// --- VARIABLES BIFURCACIONES ---
+int contadorVueltas = 0;
+int limiteVueltasParaCambio = 1; 
+bool enInterseccion = false;
+String prioridadActual = "DERECHA";
 
-float calcular_pid(float error_actual, float dt) {
-  // Proporcional
-  float P = Kp * error_actual;
+// --- VARIABLE GLOBAL DE TIEMPO ---
+unsigned long momentoPerdida = 0; 
+bool perdiendoLinea = false;
 
-  // Integral (Ahora global y acumulativa)
-  integral += error_actual * dt;
-  integral = constrain(integral, -LIMITE_INTEGRAL, LIMITE_INTEGRAL);
-  float I = Ki * integral;
+// --- FUNCIONES CORE ---
 
-  // Derivativo (Evita fluctuaciones por DT pequeño)
-  float D = Kd * ((error_actual - ultimo_error) / dt);
-
-  return P + I + D;
+int obtenerLecturaNormalizada(int i) {
+  int lectura = analogRead(pinesSensores[i]);
+  int normalizado = map(lectura, valorMin[i], valorMax[i], 0, 1000);
+  return constrain(normalizado, 0, 1000);
 }
 
 float calcularError() {
   float sumaPonderada = 0;
   float sumaLecturas = 0;
 
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < numSensores; i++) {
     float valor = obtenerLecturaNormalizada(i);
     sumaPonderada += (valor * pesos[i]);
     sumaLecturas += valor;
   }
 
-  if (sumaLecturas > 50) { // Umbral mínimo para detectar línea
-    return (sumaPonderada / sumaLecturas) - setpoint;
+  if (sumaLecturas > 150) { 
+    float posicionInstantanea = sumaPonderada / sumaLecturas;
+    float errorCrudo = posicionInstantanea - setpoint;
+
+    return errorCrudo; 
   } else {
-    return NAN; // Not a Number para indicar pérdida de línea
+    return NAN; 
   }
 }
 
-// --- FUNCIONES AUXILIARES ---
-
-
-
-// MOVER MOTORES //
-void moverMotores(int velA, int velB) {
-  // --- CONTROL MOTOR A (Izquierdo) ---
-  if (velA >= 0) {
-    digitalWrite(IN1, HIGH); 
-    digitalWrite(IN2, LOW);
-    analogWrite(ENA, constrain(velA, 0, 255));
-  } else {
-    digitalWrite(IN1, LOW); // Invertimos para reversa
-    digitalWrite(IN2, HIGH);
-    analogWrite(ENA, constrain(abs(velA), 0, 255));
-  }
-
-  // --- CONTROL MOTOR B (Derecho) ---
-  if (velB >= 0) {
-    digitalWrite(IN3, LOW); 
-    digitalWrite(IN4, HIGH);
-    analogWrite(ENB, constrain(velB, 0, 255));
-  } else {
-    digitalWrite(IN3, HIGH); // Invertimos para reversa
-    digitalWrite(IN4, LOW);
-    analogWrite(ENB, constrain(abs(velB), 0, 255));
-  }
-
-
-
+float calcular_pid(float error_actual, float dt) {
+  float P = Kp * error_actual;
+  integral += error_actual * dt;
+  integral = constrain(integral, -LIMITE_INTEGRAL, LIMITE_INTEGRAL);
+  float I = Ki * integral;
+  float D = Kd * ((error_actual - ultimo_error) / dt);
+  return P + I + D;
 }
 
-void configurarMotores() {
-  pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
-  pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
-  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH); // Sentido motor A
-  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH); // Sentido motor B
+void moverMotores(int vA, int vB) {
+  // Motor A (Izquierdo)
+  if (vA >= 0) {
+    digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  } else {
+    digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  }
+  analogWrite(ENA, constrain(abs(vA), 0, 255));
+
+  // Motor B (Derecho)
+  if (vB >= 0) {
+    digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  } else {
+    digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  }
+  analogWrite(ENB, constrain(abs(vB), 0, 255));
 }
 
-int obtenerLecturaNormalizada(int i) {
-  int lectura = analogRead(pinesSensores[i]);
-  int normalizado = map(lectura, valorMin[i], valorMax[i], 0, 1000);
-  return constrain(normalizado, 0, 1000);
+void gestionarBifurcaciones() {
+  bool s_extremo_izq = obtenerLecturaNormalizada(0) > 700; 
+  bool s_extremo_der = obtenerLecturaNormalizada(4) > 700; 
+  bool s_centro       = obtenerLecturaNormalizada(2) > 700; 
+
+  if ((s_extremo_izq && s_centro) || (s_extremo_der && s_centro)) {
+    if (!enInterseccion) {
+      enInterseccion = true;
+      // ... resto de tu lógica de prioridad ...
+      ejecutarGiroPrioritario();
+    }
+  } else {
+    enInterseccion = false; 
+  }
+}
+
+void ejecutarGiroPrioritario() {
+  if (prioridadActual == "DERECHA") moverMotores(120, -50); 
+  else if (prioridadActual == "IZQUIERDA") moverMotores(-50, 120);
 }
 
 void cargarCalibracion() {
@@ -127,88 +145,25 @@ void cargarCalibracion() {
   }
 }
 
-void mostrarValoresCargados() {
-  for (int i = 0; i < numSensores; i++) {
-    Serial.print("Sensor "); Serial.print(i);
-    Serial.print(": Min = "); Serial.print(valorMin[i]);
-    Serial.print(" | Max = "); Serial.println(valorMax[i]);
-  }}
 
 
-// --- NUEVAS VARIABLES PARA BIFURCACIONES Y BUCLES ---
-int contadorVueltas = 0;
-int limiteVueltasParaCambio = 2; // A la 3ra vez que pase, cambia prioridad
-bool enInterseccion = false;
-String prioridadActual = "DERECHA"; // Prioridad inicial: "IZQUIERDA", "DERECHA" o "RECTO"
-
-// Función para detectar bifurcaciones/intersecciones
-void gestionarBifurcaciones() {
-  bool s_izq = obtenerLecturaNormalizada(0) > 600; // Sensor extremo izquierdo
-  bool s_der = obtenerLecturaNormalizada(4) > 600; // Sensor extremo derecho
-  bool s_centro = obtenerLecturaNormalizada(2) > 600; // Sensor central
-
-  // Detectamos si estamos en una bifurcación (más de una opción clara)
-  if ((s_izq && s_centro) || (s_der && s_centro) || (s_izq && s_der)) {
-    
-    if (!enInterseccion) { // Solo ejecutamos la decisión una vez al entrar
-      enInterseccion = true;
-      
-      if (contadorVueltas >= limiteVueltasParaCambio) {
-        // Cambiar prioridad si detecta que está repitiendo
-        prioridadActual = (prioridadActual == "DERECHA") ? "IZQUIERDA" : "DERECHA";
-        contadorVueltas = 0; // Reiniciamos contador tras el cambio
-      }
-
-      ejecutarGiroPrioritario();
-    }
-  } else {
-    enInterseccion = false; 
-  }
-}
-
-void ejecutarGiroPrioritario() {
-  if (prioridadActual == "DERECHA") {
-    moverMotores(100, 0); // Giro rápido a la derecha
-    // Tiempo para "saltar" la bifurcación
-  } 
-  else if (prioridadActual == "IZQUIERDA") {
-    moverMotores(0, 100); // Giro rápido a la izquierda
-    
-  }
-  // Si es RECTO, simplemente dejamos que el PID siga su curso
-}
-
-// Lógica para contar "vueltas" o marcas en la pista
-// Puedes llamar a esta función si tienes una marca lateral o por tiempo
-void registrarPasoPorPuntoControl() {
-  static unsigned long ultimoPaso = 0;
-  if (millis() - ultimoPaso > 5000) { // Evita contar dos veces el mismo punto
-    contadorVueltas++;
-    ultimoPaso = millis();
-    Serial.print("Vuelta registrada: "); Serial.println(contadorVueltas);
-  }
-}
-
-
-
+// --- SETUP Y LOOP ---
 
 void setup() {
-
   Serial.begin(115200);
-  configurarMotores();
-  cargarCalibracion();
+  pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(10, OUTPUT); analogWrite(10, 255); 
 
-  mostrarValoresCargados();
+  cargarCalibracion();
   
-  pinMode(10, OUTPUT);
-  analogWrite(10, 255); // Iluminación sensores
-  
+  // Llenar el filtro inicialmente con el setpoint
+  for(int i=0; i<TAMANO_FILTRO; i++) muestras[i] = setpoint;
+
   tiempo_anterior = millis();
 }
 
 void loop() {
-
-  
   unsigned long tiempo_actual = millis();
   float DT = (tiempo_actual - tiempo_anterior) / 1000.0;
 
@@ -218,60 +173,78 @@ void loop() {
 
     float error = calcularError();
 
-    // --- MÁQUINA DE ESTADOS ---
-    if (!isnan(error)) {
-      // ESTADO 1: SIGUIENDO LÍNEA
+  if (!isnan(error)) {
+      // --- ESTADO: SIGUIENDO LÍNEA ---
       estadoActual = SIGUIENDO_LINEA;
-      tiempoPerdido = 0; // Resetear cronómetro
+      tiempoPerdido = 0;
+      perdiendoLinea = false;
       
+      // Calculamos un promedio rápido del error (suavizado)
+      //promedioErrorReciente = (promedioErrorReciente * 0.3) + (abs(error) * 0.7);
+
       float correccion = calcular_pid(error, DT);
-      ultima_correccion = correccion; // Guardamos la última acción
+      // ... resto de tu código de velocidades ...
+
+      int vel_din = VELOCIDAD_BASE - (abs(error) * 0.10); 
+      if (vel_din < 30) vel_din = 30;
+
+      velA = constrain(vel_din - correccion, -100, 120);
+      velB = constrain(vel_din + correccion, -100, 120);
       
-      int vel_din = VELOCIDAD_BASE - (abs(error) * 0.2);
-      if (vel_din < 40) vel_din = 40;
-      int velmin = -60; 
-      int velmax = 100;
-      velA = constrain(vel_din - correccion, velmin, velmax);
-      velB = constrain(vel_din + correccion, velmin, velmax);
+      // GUARDAMOS ESTA VELOCIDAD como la "Inercia Proporcional"
+      ultimaVelA = velA;
+      ultimaVelB = velB;
+      
       moverMotores(velA, velB);
       ultimo_error = error;
     } 
-    else {
-      // SI NO HAY LÍNEA, DECIDIMOS SEGÚN EL TIEMPO
-      if (tiempoPerdido == 0) tiempoPerdido = millis();
-      unsigned long duracionPerdida = millis() - tiempoPerdido;
 
-      if (duracionPerdida < UMBRAL_INERCIA) {
-        // ESTADO 2: MODO INERCIA (Para líneas segmentadas)
+  else {
+
+      if (!perdiendoLinea) {
+          momentoPerdida = tiempo_actual;
+          perdiendoLinea = true;
+        }
+      // --- ESTADO: MODO INERCIA DINÁMICO ---
+      
+      unsigned long tiempoPerdido = tiempo_actual - momentoPerdida;
+
+      if (tiempoPerdido < UMBRAL_INERCIA) {
         estadoActual = MODO_INERCIA;
         
-        // Mantenemos la dirección anterior pero la suavizamos (multiplicamos por 0.7)
-        velA = constrain(VELOCIDAD_BASE - (ultima_correccion * 0.7), inercia_min, inercia_max);
-        velB = constrain(VELOCIDAD_BASE + (ultima_correccion * 0.7), inercia_min, inercia_max);
-   
-        moverMotores(velA, velB);
+        // Si veníamos estables, forzamos ir recto con decisión
+        if (abs(ultimo_error) < 250) { // Subimos el umbral de 250 a 400
+            // Usamos la VELOCIDAD_BASE para asegurar que cruce el hueco
+            moverMotores(VELOCIDAD_BASE, VELOCIDAD_BASE * 1.2 ); 
+        } 
+        else {
+            // Estamos en curva: mantenemos el giro que traíamos
+            moverMotores(ultimaVelA, ultimaVelB);
+        }
       } 
       else {
-        // ESTADO 3: MODO RECUPERACIÓN (Se perdió de verdad)
+        // --- ESTADO: MODO RECUPERACIÓN (Evitar el giro de 180 grados) ---
         estadoActual = MODO_RECUPERACION;
         
-        // Girar sobre su propio eje hacia donde vio la línea por última vez
-        if (ultimo_error > 0) {
-          moverMotores(80, -60); // Giro rápido derecha
-        } else {
-          moverMotores(-60, 80); // Giro rápido izquierda
-    
+        // Si veníamos de una recta (error bajo), NO giramos brusco, 
+        // avanzamos un poco más lento para intentar encontrar la línea adelante
+        if (abs(ultimo_error) < 300) {
+            moverMotores(60, 60 * 1.2); 
+        } 
+        else {
+            // Solo si veníamos de una curva cerrada giramos fuerte
+            if (ultimo_error > 0) moverMotores(120, -80); 
+            else moverMotores(-80, 120);
         }
-
-      }}
+      }
+    }
+   
+    // Telemetría básica
+    Serial.print("Error: "); Serial.println(error);
+    Serial.print(" | VelA: "); Serial.print(velA);
+    Serial.print(" | VelB: "); Serial.println(velB);
+    Serial.print(" | ultimaVelA: "); Serial.print(ultimaVelA);
+    Serial.print(" | ultimaVelB: "); Serial.println(ultimaVelB);
+    
   }
-
- Serial.print("VelA: ");
- Serial.println(velA);
- Serial.print("VelB: ");
- Serial.println(velB);
-
- 
- }
-
-  
+}
