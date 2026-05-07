@@ -1,0 +1,78 @@
+#include <EEPROM.h>
+
+const int numSensores = 5;
+const int pinesSensores[numSensores] = {A4, A3, A0, A2, A1};
+
+// Direcciones de memoria iniciales
+const int direccionBaseMin = 0;   // Direcciones 0, 2, 4, 6, 8
+const int direccionBaseMax = 20;  // Direcciones 20, 22, 24, 26, 28
+
+int valorMin[numSensores];
+int valorMax[numSensores];
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Inicialización de arreglos
+  for (int i = 0; i < numSensores; i++) {
+    valorMin[i] = 1023;
+    valorMax[i] = 0;
+  }
+
+  // --- NUEVA LÓGICA DE ACTIVACIÓN AUTOMÁTICA ---
+  Serial.println("--- PREPARANDO CALIBRACIÓN ---");
+  Serial.println("La calibración iniciará en 3 segundos...");
+  
+  // Pequeña cuenta regresiva para que el usuario esté listo
+  for (int i = 3; i > 0; i--) {
+    Serial.print(i);
+    Serial.println("...");
+    delay(1000);
+  }
+
+  Serial.println("--- MODO CALIBRACIÓN ACTIVO ---");
+  Serial.println("Mueve el robot sobre la linea negra ahora!");
+
+  // Calibración activa (Mantenemos tus 10 segundos de lógica original)
+  unsigned long tiempoInicio = millis();
+  while (millis() - tiempoInicio < 10000) { 
+    for (int i = 0; i < numSensores; i++) {
+      int lectura = analogRead(pinesSensores[i]);
+      if (lectura < valorMin[i]) valorMin[i] = lectura;
+      if (lectura > valorMax[i]) valorMax[i] = lectura;
+    }
+    
+    // Feedback visual rápido
+    if ((millis() % 500) == 0) {
+      Serial.print("."); 
+      delay(1); // Pequeño delay para que el modulo no repita el print en el mismo milisegundo
+    }
+  }
+
+  Serial.println("\nCalibración completa. Guardando en EEPROM...");
+  guardarEnEEPROM();
+  
+  Serial.println("Valores guardados con éxito:");
+  mostrarValores();
+  Serial.println("Puedes reiniciar el robot o cargar el código de carrera.");
+}
+
+void loop() {
+  // El programa termina aquí para proteger la EEPROM
+}
+
+void guardarEnEEPROM() {
+  for (int i = 0; i < numSensores; i++) {
+    EEPROM.put(direccionBaseMin + (i * 2), valorMin[i]);
+    EEPROM.put(direccionBaseMax + (i * 2), valorMax[i]);
+  }
+}
+
+void mostrarValores() {
+  for (int i = 0; i < numSensores; i++) {
+    Serial.print("S"); Serial.print(i);
+    Serial.print(" [Min: "); Serial.print(valorMin[i]);
+    Serial.print(" Max: "); Serial.print(valorMax[i]);
+    Serial.println("]");
+  }
+}
